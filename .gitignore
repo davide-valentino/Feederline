@@ -1,0 +1,23 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+dist/
+build/
+
+# AWS SAM build artifacts
+.aws-sam/
+
+# Playwright MCP browser artifacts (trademark screening sessions)
+.playwright-mcp/
+
+# Local scratch databases
+*.db
+*.sqlite3
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store

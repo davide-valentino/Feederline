@@ -1,0 +1,345 @@
+{
+  "Comment": "Feederline direct same-region MediaConnect link and unlink",
+  "TimeoutSeconds": 1800,
+  "StartAt": "RouteEvent",
+  "States": {
+    "RouteEvent": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.eventType",
+          "StringEquals": "PipelineLink",
+          "Next": "ResolveLink"
+        },
+        {
+          "Variable": "$.eventType",
+          "StringEquals": "PipelineUnlink",
+          "Next": "ResolveUnlink"
+        }
+      ],
+      "Default": "UnsupportedEvent"
+    },
+    "ResolveLink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "resolve_link",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id"
+        }
+      },
+      "ResultSelector": {"plan.$": "$.Payload.plan"},
+      "ResultPath": "$.resolved",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordLinkFailure"}],
+      "Next": "InitializeLinkWait"
+    },
+    "InitializeLinkWait": {
+      "Type": "Pass",
+      "Result": {"attempt": 0},
+      "ResultPath": "$.wait",
+      "Next": "CheckLinkFlow"
+    },
+    "CheckLinkFlow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "check_flow",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "plan.$": "$.resolved.plan"
+        }
+      },
+      "ResultSelector": {"status.$": "$.Payload.status"},
+      "ResultPath": "$.flow",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordLinkFailure"}],
+      "Next": "LinkFlowReady?"
+    },
+    "LinkFlowReady?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.flow.status", "StringEquals": "ACTIVE", "Next": "ApplyLink"},
+        {"Variable": "$.flow.status", "StringEquals": "STANDBY", "Next": "ApplyLink"}
+      ],
+      "Default": "LinkWaitLimit?"
+    },
+    "LinkWaitLimit?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.wait.attempt", "NumericGreaterThanEquals": 60, "Next": "LinkFlowTimeout"}
+      ],
+      "Default": "WaitBeforeLinkCheck"
+    },
+    "WaitBeforeLinkCheck": {"Type": "Wait", "Seconds": 10, "Next": "IncrementLinkWait"},
+    "IncrementLinkWait": {
+      "Type": "Pass",
+      "Parameters": {"attempt.$": "States.MathAdd($.wait.attempt, 1)"},
+      "ResultPath": "$.wait",
+      "Next": "CheckLinkFlow"
+    },
+    "ApplyLink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "apply_link",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "plan.$": "$.resolved.plan"
+        }
+      },
+      "ResultSelector": {"resourceMap.$": "$.Payload.resourceMap"},
+      "ResultPath": "$.applied",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "CompensateLink"}],
+      "Next": "CompleteLink"
+    },
+    "CompleteLink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "complete_link",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "CompensateLink"}],
+      "End": true
+    },
+    "CompensateLink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "compensate_link",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.compensationFailure", "Next": "FormatCompensationFailure"}],
+      "Next": "RecordLinkFailure"
+    },
+    "FormatCompensationFailure": {
+      "Type": "Pass",
+      "Parameters": {
+        "Cause.$": "States.Format('Link failure: {}; compensation failure: {}', $.failure.Cause, $.compensationFailure.Cause)"
+      },
+      "ResultPath": "$.failure",
+      "Next": "RecordLinkFailure"
+    },
+    "RecordLinkFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "record_failure",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "error.$": "$.failure.Cause"
+        }
+      },
+      "Next": "LinkFailed"
+    },
+    "LinkFlowTimeout": {
+      "Type": "Pass",
+      "Result": {"Cause": "MediaConnect flow did not reach ACTIVE or STANDBY before timeout"},
+      "ResultPath": "$.failure",
+      "Next": "RecordLinkFailure"
+    },
+    "ResolveUnlink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "resolve_unlink",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id"
+        }
+      },
+      "ResultSelector": {"plan.$": "$.Payload.plan", "resourceMap.$": "$.Payload.resourceMap"},
+      "ResultPath": "$.resolved",
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordUnlinkFailure"}],
+      "Next": "InitializeUnlinkWait"
+    },
+    "InitializeUnlinkWait": {
+      "Type": "Pass",
+      "Result": {"attempt": 0},
+      "ResultPath": "$.wait",
+      "Next": "CheckUnlinkFlow"
+    },
+    "CheckUnlinkFlow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "check_flow",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "plan.$": "$.resolved.plan"
+        }
+      },
+      "ResultSelector": {"status.$": "$.Payload.status"},
+      "ResultPath": "$.flow",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordUnlinkFailure"}],
+      "Next": "UnlinkFlowReady?"
+    },
+    "UnlinkFlowReady?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.flow.status", "StringEquals": "ACTIVE", "Next": "ApplyUnlink"},
+        {"Variable": "$.flow.status", "StringEquals": "STANDBY", "Next": "ApplyUnlink"}
+      ],
+      "Default": "UnlinkWaitLimit?"
+    },
+    "UnlinkWaitLimit?": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.wait.attempt", "NumericGreaterThanEquals": 60, "Next": "UnlinkFlowTimeout"}
+      ],
+      "Default": "WaitBeforeUnlinkCheck"
+    },
+    "WaitBeforeUnlinkCheck": {"Type": "Wait", "Seconds": 10, "Next": "IncrementUnlinkWait"},
+    "IncrementUnlinkWait": {
+      "Type": "Pass",
+      "Parameters": {"attempt.$": "States.MathAdd($.wait.attempt, 1)"},
+      "ResultPath": "$.wait",
+      "Next": "CheckUnlinkFlow"
+    },
+    "ApplyUnlink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "apply_unlink",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "resourceMap.$": "$.resolved.resourceMap"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 5
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordUnlinkFailure"}],
+      "Next": "CompleteUnlink"
+    },
+    "CompleteUnlink": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "complete_unlink",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "RecordUnlinkFailure"}],
+      "End": true
+    },
+    "RecordUnlinkFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DirectWorkflowActivitiesArn}",
+        "Payload": {
+          "action": "record_failure",
+          "eventId.$": "$.eventId",
+          "deliveryId.$": "$.detail.deliveryId",
+          "executionArn.$": "$$.Execution.Id",
+          "error.$": "$.failure.Cause"
+        }
+      },
+      "Next": "UnlinkFailed"
+    },
+    "UnlinkFlowTimeout": {
+      "Type": "Pass",
+      "Result": {"Cause": "MediaConnect flow did not reach ACTIVE or STANDBY before timeout"},
+      "ResultPath": "$.failure",
+      "Next": "RecordUnlinkFailure"
+    },
+    "UnsupportedEvent": {"Type": "Fail", "Error": "UnsupportedEventType"},
+    "LinkFailed": {"Type": "Fail", "Error": "DirectLinkFailed"},
+    "UnlinkFailed": {"Type": "Fail", "Error": "DirectUnlinkFailed"}
+  }
+}
