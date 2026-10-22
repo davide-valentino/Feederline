@@ -1,7 +1,8 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "@dlacaille/opencode-copilot-instructions"
+    "@dlacaille/opencode-copilot-instructions",
+    "@jfrz38/opencode-copy-last@latest"
   ],
   "skills": [
     "./.opencode/skills"
