@@ -4,6 +4,7 @@
     "@dlacaille/opencode-copilot-instructions",
     "@jfrz38/opencode-copy-last@latest"
   ],
+  "experimental": { "artifacts": true },
   "skills": [
     "./.opencode/skills"
   ],
