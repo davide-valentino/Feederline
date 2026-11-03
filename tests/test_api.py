@@ -182,7 +182,7 @@ def test_cancel_pending_delivery_cancels_its_scheduled_events(client, test_sessi
     assert all(event.status == OutboxStatus.CANCELLED.value for event in events)
 
 
-def test_delivery_start_and_stop_callbacks_complete_lifecycle(client):
+def test_delivery_start_and_stop_callbacks_complete_lifecycle(client, operator_headers):
     source = client.post(
         "/v1/sources",
         json={
@@ -211,10 +211,16 @@ def test_delivery_start_and_stop_callbacks_complete_lifecycle(client):
     )
     delivery_id = created.json()["id"]
 
-    started = client.post(f"/internal/deliveries/{delivery_id}/start")
-    repeated_start = client.post(f"/internal/deliveries/{delivery_id}/start")
+    started = client.post(
+        f"/internal/deliveries/{delivery_id}/start", headers=operator_headers
+    )
+    repeated_start = client.post(
+        f"/internal/deliveries/{delivery_id}/start", headers=operator_headers
+    )
     pipeline_started = client.post(f"/v1/deliveries/{delivery_id}/pipeline-started")
-    stopping = client.post(f"/internal/deliveries/{delivery_id}/stop")
+    stopping = client.post(
+        f"/internal/deliveries/{delivery_id}/stop", headers=operator_headers
+    )
     completed = client.post(f"/v1/deliveries/{delivery_id}/pipeline-stopped")
 
     assert started.json()["state"] == "STARTING"
@@ -225,7 +231,7 @@ def test_delivery_start_and_stop_callbacks_complete_lifecycle(client):
 
 
 def test_stop_during_start_waits_for_link_completion_before_queueing_unlink(
-    client, test_session_factory
+    client, test_session_factory, operator_headers
 ):
     source = client.post(
         "/v1/sources",
@@ -255,8 +261,18 @@ def test_stop_during_start_waits_for_link_completion_before_queueing_unlink(
     ).json()
     delivery_id = delivery["id"]
 
-    assert client.post(f"/internal/deliveries/{delivery_id}/start").json()["state"] == "STARTING"
-    assert client.post(f"/internal/deliveries/{delivery_id}/stop").json()["state"] == "STOPPING"
+    assert (
+        client.post(
+            f"/internal/deliveries/{delivery_id}/start", headers=operator_headers
+        ).json()["state"]
+        == "STARTING"
+    )
+    assert (
+        client.post(
+            f"/internal/deliveries/{delivery_id}/stop", headers=operator_headers
+        ).json()["state"]
+        == "STOPPING"
+    )
     with test_session_factory() as session:
         before_link_finishes = session.scalars(
             select(DeliveryOutboxEvent).where(

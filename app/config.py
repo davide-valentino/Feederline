@@ -45,6 +45,10 @@ class Settings:
     workflow_state_machine_arn: str = os.environ.get("WORKFLOW_STATE_MACHINE_ARN", "")
     aws_region: str = os.environ.get("AWS_REGION", "eu-west-1")
     outbox_poll_seconds: float = float(os.environ.get("OUTBOX_POLL_SECONDS", "2"))
+    # P0 placeholder operator boundary (D4). This is a shared secret, not identity.
+    # No usable default: an unset token makes the boundary fail closed (503).
+    operator_token: str = os.environ.get("OPERATOR_TOKEN", "")
+    operator_actor: str = os.environ.get("OPERATOR_ACTOR", "operator")
 
 
 settings = Settings()

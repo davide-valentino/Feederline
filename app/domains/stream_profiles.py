@@ -8,6 +8,7 @@ from sqlalchemy import JSON, String, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from app.auth import require_operator
 from app.database import Base, CreatedAtMixin, get_session
 
 
@@ -64,7 +65,11 @@ class StreamProfileRead(BaseModel):
     created_at: datetime
 
 
-router = APIRouter(prefix="/v1/stream-profiles", tags=["stream profiles"])
+router = APIRouter(
+    prefix="/v1/stream-profiles",
+    tags=["stream profiles"],
+    dependencies=[Depends(require_operator)],
+)
 
 
 @router.post("", response_model=StreamProfileRead, status_code=status.HTTP_201_CREATED)

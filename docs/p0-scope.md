@@ -12,7 +12,8 @@ One design partner can, without touching AWS primitives:
 
 1. register a channel/event and its feeds and outputs;
 2. declare a **route** with a schedule, a quality preset, N outputs and a resilience level;
-3. get an **authoritative dry-run**: feasibility checks + a read-only resolved plan;
+3. get an **authoritative dry-run**: feasibility checks + a customer-safe plan summary
+   (the full resolved plan is operator-only);
 4. schedule it, see it provision, go live, degrade/fail, complete or stop;
 5. have support inspect deliveries, plans and outbox events, retry a failure, and stop a run —
    with every operator action audited.
@@ -32,14 +33,14 @@ through `/internal/*` with a token.
 | Capability catalog served as data (code-defined) | Capability admin CRUD / per-tenant overrides |
 | Route create + dry-run + schedule + cancel/stop | Route revisions / edit / reschedule / duplicate |
 | Fan-out to N outputs (one Delivery per output) | Calendar/timeline view |
-| Authoritative server-side checks + resolved plan | Pricing / quote |
+| Authoritative server-side checks + plan summary | Pricing / quote |
 | Route event vocabulary | Custom ABR ladders |
 | Operator reads + retry/stop + audit, behind a token | Full RBAC, multi-tenant roles, separate portal |
 | Output overlap / conflict detection on create | Feed contention / capacity planning |
 | Existing `Delivery` state machine reused unchanged | Second execution engine |
 
 Commercial concepts (packages, entitlements, pricing, billing) stay out of the domain model.
-The resolved plan keeps a `cost` **seam** only (no fields, no endpoint).
+The resolved plan (operator-only) keeps a `cost` **seam** only (no fields, no endpoint).
 
 ## 3. Domain model
 
@@ -75,8 +76,9 @@ No parallel `connection` table in P0. Extend the existing execution tables, beca
   `source_type` as the execution field, keep `region`, `config`, `stream_profile_id`.
 - `destination` becomes the **Output**: add `capability_id` (e.g. `hls`), keep
   `destination_type`, keep `region`, `config`.
-- `config` holds the capability-required fields (endpoint, stream ID, entitlement,
-  whitelist CIDR, target, etc.) and is validated against the catalog on write.
+- `config` holds the capability-required fields (port, latency, whitelist CIDR, stream ID,
+  entitlement ARN, bucket/folder, URL, egress access, etc.) and is validated against the
+  catalog on write.
 - `source_type` / `destination_type` are **derived** from the capability's `legacy_*` field
   (§3.6), not chosen by the client — the capability is the public contract, the type is the
   execution detail.
@@ -159,7 +161,13 @@ for free.
 > per-leg `redundant_output_id` supplies the redundant destination. `single` leaves both
 > redundant FKs null. This is the only shape that keeps `ck_delivery_redundant_pair` and the
 > overlap check unchanged. If a shared redundant feed per route proves wrong, move
-> `redundant_feed_id` into `route_output` per leg (see §11).
+> `redundant_feed_id` into `route_output` per leg (see §11). The
+> `geo-redundancy-requires-two-regions` check counts **primary** output legs only: the
+> execution kernel requires a redundant pair to be same-region (different AZ), so
+> cross-region redundancy is expressed as two primary legs, not as a cross-region pair.
+> The redundant feed must be distinct from the primary feed (`duplicate-redundant-feed`)
+> and in the same region (`redundant-feed-region-mismatch`); each redundant output must be
+> in the same region as its primary output (`redundant-output-region-mismatch`).
 
 ### 3.5 Route events
 
@@ -188,30 +196,41 @@ Code-defined in P0, served read-only. No `capability` table yet.
 
 ```text
 app/capabilities/catalog.py
-  CATALOG_VERSION = "2026-11-01"
+  CATALOG_VERSION = "2026-11-03"
   TRANSPORTS: list[Capability]   # 6
-  FORMATS: list[Capability]      # 6
+  FORMATS: list[Capability]      # 11
   PRESETS: list[QualityPreset]   # 4
 ```
 
 Each capability carries: `id`, `kind` (`transport` | `format`), `name`, `mode`,
 `regions: {eu|uk|us|ap → {available, reason}}`, `required_fields: [FieldSpec]`,
-`constraints` (`requires_transcode`, `max_outputs`, `encrypted_by_default`, …),
-`legacy_source_type` / `legacy_destination_type` (the execution field to write), and a
-`plan_recipe` (ordered resource fragments).
+`constraints`, `fixed_config` (platform-filled values such as the protocol under
+`ipsource`), `legacy_source_type` / `legacy_destination_type` (the execution field to
+write), a `plan_recipe` and a `transcode_recipe`.
 
-Presets: `id`, `name`, `description`, `ladder: [str]`, `transcode: bool`, `version`.
+A `FieldSpec` carries `field_type` (`string` | `integer` | `boolean` | `url` | `cidr`),
+`required`, `choices`, `required_when` (conditional requirement) and `secret`. Write-time
+validation enforces required/conditional fields, choice membership and CIDR/URL shape.
 
-P0 seeds the artifact's six transports (SRT listener/caller, RTP, RIST, Zixi, MediaConnect),
-six formats (linear, SRT, RTMP, HLS, DASH, archive) and four presets (passthrough, 1080p,
-1080p-premium, 4K UHD). Values are illustrative; the **shape** is what P0 ships.
+Presets: `id`, `name`, `description`, `ladder: [Rendition]`, `transcode`,
+`profile` (codec/GOP/rate-control/frame-rate/scan/colour-space, or `None` for
+passthrough) and `audio_tracks`. `passthrough` means "reuse the source profile"; the
+other presets resolve to a bundled profile. RTMP pins the audio track count to 1.
 
-**Capability ↔ legacy type mapping is explicit, not inferred.** The catalog taxonomy and the
-execution enums differ: `rtp` maps to `ipsource`, `zixi` maps to `zixipushsource`, and `rist`
-has **no** legacy `source_type`. The `legacy_*` field on each capability is what the plan
-resolver writes into `source.source_type` / `destination.destination_type`. A capability with
-no `legacy_*` value (e.g. `rist`) is catalog-visible but its dry-run returns an error until
-the kernel supports it.
+P0 ships the corrected six transports (SRT listener/caller, RTP, RIST, Zixi, MediaConnect)
+and eleven outputs (linear/IP, SRT caller/listener, RTMP, HLS, DASH, S3 archive,
+MediaShuttle, MediaConnect, Zixi push/pull), plus four presets (passthrough, 1080p,
+1080p-premium, 4K UHD). Field sets and resource recipes are aligned with the classic
+Arqade services; see `docs/arqade-counterpart-review.md`.
+
+**Capability ↔ legacy type mapping is explicit, not inferred.** `rtp` and `rist` both map
+to `ipsource` (RIST is `protocol=rist` in `fixed_config`, not a separate source type),
+`zixi` maps to `zixipushsource`, and `mediaconnect` requires the customer's
+`entitlement_arn` — the flow ARN is generated by the platform. The `legacy_*` field on
+each capability is what the plan resolver writes into `source.source_type` /
+`destination.destination_type`. A capability without a `legacy_*` value would be
+catalog-visible but non-executable; none is in the P0 catalog.
+
 
 > **Decision D3** — the catalog's source of truth is code in P0, served via API. A DB-backed
 > catalog with per-tenant rollout is P1. This is deliberate: it avoids building an admin
@@ -240,21 +259,35 @@ soft delete, unique names and 409 on conflict — same conventions as `app/domai
 | POST | `/v1/feeds` | create feed (capability + region + config) |
 | GET | `/v1/feeds` | list |
 | GET/PATCH/DELETE | `/v1/feeds/{id}` | get/update/soft-delete |
-| POST | `/v1/outputs` | create output (format capability + target + region) |
+| POST | `/v1/outputs` | create output (format capability + region + config) |
 | GET | `/v1/outputs` | list |
 | GET/PATCH/DELETE | `/v1/outputs/{id}` | get/update/soft-delete |
 
-Write-time validation: `capability_id` exists, region is available for it, every
-`required_field` is present and non-blank, and `constraints` hold (e.g. an HLS output is
-allowed to exist but the dry-run flags the transcode requirement).
+Write-time validation: `capability_id` exists and matches the endpoint's kind, region is
+available for it, every required/conditional `required_field` is present, choice fields
+match their allowed values, and `cidr`/`url` fields are well formed. Platform-filled values
+(e.g. `protocol` for RTP/RIST) are merged into `config` and are not asked of the customer.
+
+Reads return a **capability summary** (`id`, `kind`, `name`, `mode`), the region and a
+`details` object containing only standard (non-provider, non-secret) values. Execution
+types (`source_type`/`destination_type`), provider identifiers (ARNs, account/bucket
+names), `config`, `availability_zone` and `stream_profile_id` are never returned on the
+customer surface. Customer connections and legacy execution rows are separate name
+domains: a customer name cannot be used to detect a hidden legacy row, and uniqueness is
+enforced within each domain.
 
 ### 4.3 Capabilities & presets
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/v1/capabilities` | full catalog + `catalog_version` |
+| GET | `/v1/capabilities` | public catalog + `catalog_version` |
 | GET | `/v1/capabilities/{id}` | one capability |
 | GET | `/v1/quality-presets` | preset catalog |
+
+The customer catalog exposes `id`, `kind`, `name`, `mode`, regions, required fields and
+safe constraints, but **not** `legacy_*` types, `fixed_config`, `plan_recipe`,
+`transcode_recipe` or a preset's codec profile. Those are served by
+`/internal/capabilities` and `/internal/quality-presets`.
 
 Filtering (`?kind=transport&region=eu`) is nice-to-have, not required for P0.
 
@@ -262,14 +295,14 @@ Filtering (`?kind=transport&region=eu`) is nice-to-have, not required for P0.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/v1/routes/dry-run` | authoritative checks + resolved plan; **no persistence** |
+| POST | `/v1/routes/dry-run` | authoritative checks + customer plan summary; **no persistence** |
 | POST | `/v1/routes` | create + schedule; fan-out to one Delivery per output |
 | GET | `/v1/routes` | list (`?state=`, `?content_id=`, `?from=&to=`) |
 | GET | `/v1/routes/{id}` | get (desired, observed, health, plan summary) |
 | POST | `/v1/routes/{id}/cancel` | cancel before start |
 | POST | `/v1/routes/{id}/stop` | stop an active route |
 | GET | `/v1/routes/{id}/events` | customer event timeline |
-| GET | `/v1/routes/{id}/plan` | resolved plan (read-only) |
+| GET | `/v1/routes/{id}/plan` | customer plan summary (full plan: `/internal/plans/{id}`) |
 
 Route create body (dry-run uses the same body):
 
@@ -288,7 +321,7 @@ Route create body (dry-run uses the same body):
 }
 ```
 
-Dry-run response:
+Dry-run response (customer-safe):
 
 ```json
 {
@@ -297,17 +330,18 @@ Dry-run response:
     {"level": "warn", "code": "transcode-required", "message": "…"}
   ],
   "effective_quality_preset": "1080p",
-  "plan": {
-    "provider": "aws",
-    "workflow": "hls_eu_west_redundant",
-    "region": "eu-west-1",
-    "resources": ["…"],
+  "plan_summary": {
+    "effective_quality_preset": "1080p",
     "estimated_start": "35-50s",
-    "version": 1,
-    "resolved_at": "2026-11-03T12:00:00Z"
+    "output_count": 2,
+    "resilience": "redundant",
+    "audio_tracks": 4
   }
 }
 ```
+
+The full plan (`provider`, `workflow`, `region`, `resources`, `stream_profile`) is available
+only from `POST /internal/routes/dry-run` and `GET /internal/plans/{route_id}`.
 
 `feasible` is false iff any check has `level = "error"`. Blocking checks are enforced again
 server-side on `POST /v1/routes`; a client cannot schedule an infeasible route.
@@ -335,9 +369,18 @@ boundary and the seam for P1 #10.
 | GET | `/internal/deliveries/{id}` | detail incl. workflow runs |
 | POST | `/internal/deliveries/{id}/retry` | re-queue a failed event (audited) |
 | POST | `/internal/deliveries/{id}/stop` | stop (audited; reuse existing logic) |
+| GET | `/internal/capabilities` | full catalog incl. legacy types, recipes, fixed config |
+| GET | `/internal/capabilities/{id}` | one capability with execution detail |
+| GET | `/internal/quality-presets` | presets incl. codec profile |
+| POST | `/internal/routes/dry-run` | full feasibility evaluation + resolved plan |
 | GET | `/internal/plans/{route_id}` | resolved plan + resource map |
 | GET | `/internal/outbox` | outbox events (`?status=&route_id=`) |
+| GET | `/internal/route-events` | raw route events incl. kernel metadata |
 | GET | `/internal/audit` | operator audit log |
+
+Legacy execution routes (`/v1/sources`, `/v1/destinations`, `/v1/stream-profiles`,
+`/v1/deliveries`) remain for one release but now require the operator token: they expose
+execution types and kernel state and are not part of the customer intent surface.
 
 New table `operator_audit`: `id`, `actor` (token label/name), `action`, `target_type`,
 `target_id`, `request_metadata` JSON, `created_at`. Every mutating internal route writes one
@@ -360,16 +403,22 @@ in the same change. This is a behavior change and must be called out in the chan
    - feed capability available in feed region;
    - every output capability available in its region;
    - OTT output (HLS/DASH/RTMP) with `passthrough` → warn + effective preset upgrade;
-   - `geo-redundant` requires outputs in ≥ 2 regions;
-   - `redundant`/`geo-redundant` requires a redundant feed and a redundant output on every
-     leg (D7);
+   - `geo-redundant` requires **primary** outputs in ≥ 2 regions; a redundant output is a
+     same-region twin and does not add a region;
+   - `redundant`/`geo-redundant` requires a redundant feed, distinct from the primary
+     (`duplicate-redundant-feed`) and in the same region (`redundant-feed-region-mismatch`),
+     plus a redundant output on every leg in the same region as its primary
+     (`redundant-output-region-mismatch`). When both availability zones are set they must
+     differ (the execution kernel's redundant pair is same-region, different-AZ);
    - output overlap against active/scheduled deliveries (reuse the `Delivery` overlap query);
    - `uhd` + `geo-redundant` → info/approval note;
-   - event + open-ended → warn;
+   - event + open-ended → error (events must have an end);
+   - bounded route shorter than 10 minutes → error;
    - end ≤ start → error.
 4. Resolve the plan from the catalog's `plan_recipe` (provider, workflow, region, ordered
    resources, estimated start, version). The plan is **derived**, never client-supplied.
-5. Return `feasible`, `checks`, `effective_quality_preset`, `plan`. Persist nothing.
+5. Return `feasible`, `checks`, `effective_quality_preset`, `plan_summary`. Persist nothing.
+   `POST /internal/routes/dry-run` returns the full plan instead.
 
 ### 6.2 Schedule / fan-out
 
@@ -388,7 +437,9 @@ in the same change. This is a behavior change and must be called out in the chan
 
 Idempotency: `POST /v1/routes` accepts an `Idempotency-Key` header; repeated keys return the
 same route (new table `idempotency_key` or a unique `(tenant, key)` column — P0 can use a
-small table with `key`, `route_id`, `created_at`).
+small table with `key`, `route_id`, `request_fingerprint`, `created_at`). The stored
+`request_fingerprint` is a sha256 of the canonicalised intent, so replaying a key with a
+different body returns **409**, not the first route.
 
 ### 6.3 Lifecycle reconciliation
 
@@ -468,8 +519,8 @@ once no customer depends on them.
 2. Dry-run rejects an infeasible transport/region pair, a missing redundant feed or
    redundant output for `redundant`, a past start, and `end <= start`; `POST /v1/routes`
    rejects the same inputs even if the client skips dry-run.
-3. `passthrough` + HLS returns a warning, upgrades the effective preset to `1080p`, and the
-   plan includes a transcode resource.
+3. `passthrough` + HLS returns a warning, upgrades the effective preset to `1080p`, the
+   customer summary reports `1080p`, and the operator plan includes a transcode resource.
 4. Scheduling an output that overlaps an active delivery returns 409.
 5. Route transitions follow delivery transitions per §6.3 and emit exactly one customer event
    per transition (idempotent re-sync emits none).

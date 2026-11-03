@@ -3,12 +3,16 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.domains.deliveries import Delivery, DeliveryWorkflowRun, WorkflowRunStatus
 from app.workflows.direct_same_region import (
     ensure_flow_output,
     remove_flow_output,
     resolve_direct_link_plan,
 )
+
+
+OPERATOR_HEADERS = {"X-Operator-Token": settings.operator_token}
 
 
 def create_linkable_delivery(client):
@@ -48,7 +52,9 @@ def create_linkable_delivery(client):
             "planned_end": (start + timedelta(hours=1)).isoformat(),
         },
     ).json()
-    client.post(f"/internal/deliveries/{delivery['id']}/start")
+    client.post(
+        f"/internal/deliveries/{delivery['id']}/start", headers=OPERATOR_HEADERS
+    )
     return delivery
 
 
@@ -195,7 +201,9 @@ def test_direct_link_and_unlink_activities_persist_and_reuse_resource_map(
         assert link_run.status == WorkflowRunStatus.SUCCEEDED.value
         assert linked_delivery.state == "IN_PROGRESS"
 
-    client.post(f"/internal/deliveries/{delivery['id']}/stop")
+    client.post(
+        f"/internal/deliveries/{delivery['id']}/stop", headers=OPERATOR_HEADERS
+    )
     with test_session_factory() as session:
         unlink_run = session.scalar(
             select(DeliveryWorkflowRun).where(

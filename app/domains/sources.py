@@ -5,10 +5,11 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import JSON, ForeignKey, String, or_, select
+from sqlalchemy import JSON, ForeignKey, Index, String, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from app.auth import require_operator
 from app.database import Base, CreatedAtMixin, get_session
 from app.domains.stream_profiles import StreamProfile
 
@@ -23,10 +24,29 @@ class SourceType(str, Enum):
 
 class Source(Base, CreatedAtMixin):
     __tablename__ = "source"
+    __table_args__ = (
+        # Customer Feeds and legacy Sources are separate name domains, so a customer
+        # name cannot be used to probe for a hidden legacy row.
+        Index(
+            "uq_source_customer_name",
+            "name",
+            unique=True,
+            sqlite_where=text("capability_id IS NOT NULL"),
+            postgresql_where=text("capability_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_source_legacy_name",
+            "name",
+            unique=True,
+            sqlite_where=text("capability_id IS NULL"),
+            postgresql_where=text("capability_id IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_id: Mapped[str | None] = mapped_column(String(64))
     region: Mapped[str] = mapped_column(String(64), nullable=False)
     availability_zone: Mapped[str | None] = mapped_column(String(64))
     stream_profile_id: Mapped[UUID | None] = mapped_column(
@@ -81,6 +101,7 @@ class SourceRead(BaseModel):
     id: UUID
     name: str
     source_type: str
+    capability_id: str | None
     region: str
     availability_zone: str | None
     stream_profile_id: UUID | None
@@ -88,7 +109,11 @@ class SourceRead(BaseModel):
     created_at: datetime
 
 
-router = APIRouter(prefix="/v1/sources", tags=["sources"])
+router = APIRouter(
+    prefix="/v1/sources",
+    tags=["sources"],
+    dependencies=[Depends(require_operator)],
+)
 
 
 @router.post("", response_model=SourceRead, status_code=status.HTTP_201_CREATED)

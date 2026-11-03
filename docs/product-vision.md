@@ -54,7 +54,7 @@ Two deliberate vocabularies, one boundary.
 - **Route** — the only scheduling object: content → outputs, when, with how much resilience
   and which quality preset. Fans out to N outputs.
 - **Connection** — a Feed (transport + region + encryption + capability-required params) or
-  an Output (format + target + region).
+  an Output (format capability + region + config).
 - **Capability** — what is available where and what it requires, as data (region matrix,
   required fields, constraints such as "HLS requires transcode").
 - **Delivery / resolved plan / outbox** — the control-plane kernel that actually executes a
@@ -70,11 +70,14 @@ Summary of the evaluation conclusions, locked for the MVP.
    capabilities. "Concept" is a design doc, not a shipped surface. "Operator" is a role, not
    a nav item.
 3. **Capability registry removes the type matrix** — the "5 × 11 typed resources" model
-   collapses into 6 transports × 6 formats described by data. No expert JSON path at MVP.
+   collapses into 6 transports × 11 outputs described by data. No expert JSON path at MVP.
 4. **Quality presets are an accepted abstraction** — passthrough / 1080p / 1080p premium /
    4K UHD replace stream profiles and rendition ladders. Custom ladders deferred.
 5. **Operator split is a role boundary, not a UI toggle** — enforced server-side via the
-   internal surface, with audit. Customers never see provider identifiers.
+   internal surface, with audit. Customers never see provider identifiers. Customer read
+   models expose capability summaries only: execution types (`source_type`/
+   `destination_type`), raw `config`, ARNs/account/bucket identifiers, delivery ids and
+   resolved plans are operator-only (`/internal/*`).
 6. **Commercial concepts are out of scope (dropped)** — packages, entitlements, pricing and
    billing live outside the domain model. The resolved plan keeps a *seam* for a future
    pricing service, but no `price`/`package` fields leak into Route or Capability. The

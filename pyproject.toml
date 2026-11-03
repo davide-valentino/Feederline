@@ -1,22 +1,20 @@
-[project]
+[tool.poetry]
 name = "feederline"
 version = "0.1.0"
 description = "Standalone Feederline backend proof of concept"
-authors = [{ name = "Arqiva", email = "enquiries@arqiva.com" }]
+authors = ["Arqiva <enquiries@arqiva.com>"]
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
-dependencies = [
-	"alembic>=1.14,<2.0",
-	"boto3>=1.35,<2.0",
-	"fastapi>=0.115,<1.0",
-	"psycopg[binary]>=3.2,<4.0",
-	"python-dotenv>=1.0,<2.0",
-	"sqlalchemy>=2.0,<3.0",
-	"uvicorn[standard]>=0.32,<1.0",
-]
-
-[tool.poetry]
 packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+alembic = ">=1.14,<2.0"
+boto3 = ">=1.35,<2.0"
+fastapi = ">=0.115,<1.0"
+psycopg = { version = ">=3.2,<4.0", extras = ["binary"] }
+python-dotenv = ">=1.0,<2.0"
+sqlalchemy = ">=2.0,<3.0"
+uvicorn = { version = ">=0.32,<1.0", extras = ["standard"] }
 
 [tool.poetry.group.dev.dependencies]
 httpx = ">=0.27,<1.0"

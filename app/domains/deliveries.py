@@ -21,6 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base, CreatedAtMixin, UTCDateTime, get_session
+from app.auth import require_operator
+from app.domains.audit import record_audit
 from app.domains.destinations import Destination
 from app.domains.sources import Source
 
@@ -65,6 +67,7 @@ class Delivery(Base, CreatedAtMixin):
             "planned_end IS NULL OR planned_end > planned_start",
             name="ck_delivery_end_after_start",
         ),
+        Index("ix_delivery_route_id", "route_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -79,6 +82,9 @@ class Delivery(Base, CreatedAtMixin):
     )
     redundant_destination_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("destination.id", ondelete="RESTRICT")
+    )
+    route_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("route.id", ondelete="SET NULL")
     )
     planned_start: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     planned_end: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -173,6 +179,7 @@ class DeliveryRead(BaseModel):
     destination_id: UUID
     redundant_source_id: UUID | None
     redundant_destination_id: UUID | None
+    route_id: UUID | None
     planned_start: datetime
     planned_end: datetime | None
     is_open_ended: bool
@@ -183,8 +190,130 @@ class DeliveryRead(BaseModel):
     created_at: datetime
 
 
-router = APIRouter(prefix="/v1/deliveries", tags=["deliveries"])
-internal_router = APIRouter(prefix="/internal/deliveries", tags=["delivery events"])
+router = APIRouter(
+    prefix="/v1/deliveries",
+    tags=["deliveries"],
+    dependencies=[Depends(require_operator)],
+)
+internal_router = APIRouter(
+    prefix="/internal/deliveries",
+    tags=["delivery events"],
+    dependencies=[Depends(require_operator)],
+)
+
+
+def _lock_delivery_table(session: Session) -> None:
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        session.execute(text("LOCK TABLE delivery IN SHARE ROW EXCLUSIVE MODE"))
+
+
+def find_overlapping_delivery(
+    session: Session,
+    destination_ids: set[UUID],
+    planned_start: datetime,
+    planned_end: datetime | None,
+) -> UUID | None:
+    """Return an active delivery that overlaps the given outputs/schedule, if any.
+
+    Shared with the route dry-run and route fan-out so there is one definition of
+    output contention.
+    """
+
+    if not destination_ids:
+        return None
+    overlap_conditions = [
+        Delivery.destination_id.in_(destination_ids),
+        Delivery.redundant_destination_id.in_(destination_ids),
+    ]
+    overlap_filters = [
+        Delivery.state.in_(
+            [
+                DeliveryState.PENDING.value,
+                DeliveryState.STARTING.value,
+                DeliveryState.IN_PROGRESS.value,
+                DeliveryState.STOPPING.value,
+            ]
+        ),
+        or_(Delivery.planned_end.is_(None), Delivery.planned_end > planned_start),
+        or_(*overlap_conditions),
+    ]
+    if planned_end is not None:
+        overlap_filters.append(Delivery.planned_start < planned_end)
+    return session.scalar(select(Delivery.id).where(*overlap_filters).limit(1))
+
+
+def _add_delivery_with_events(
+    session: Session,
+    *,
+    source_id: UUID,
+    destination_id: UUID,
+    redundant_source_id: UUID | None,
+    redundant_destination_id: UUID | None,
+    planned_start: datetime,
+    planned_end: datetime | None,
+    is_open_ended: bool,
+    route_id: UUID | None = None,
+    stream_profile_locked: bool = False,
+    media_options: dict[str, Any] | None = None,
+) -> Delivery:
+    """Create one delivery and its scheduled outbox events without committing.
+
+    The route fan-out calls this so ``POST /v1/routes`` and the legacy delivery API
+    share exactly one delivery-creation implementation.
+    """
+
+    delivery = Delivery(
+        source_id=source_id,
+        destination_id=destination_id,
+        redundant_source_id=redundant_source_id,
+        redundant_destination_id=redundant_destination_id,
+        route_id=route_id,
+        planned_start=planned_start,
+        planned_end=planned_end,
+        is_open_ended=is_open_ended,
+        stream_profile_locked=stream_profile_locked,
+        media_options=media_options or {},
+    )
+    session.add(delivery)
+    session.flush()
+    session.add(
+        DeliveryOutboxEvent(
+            delivery_id=delivery.id,
+            event_type="DeliveryStart",
+            due_at=planned_start,
+            payload={"deliveryId": str(delivery.id)},
+        )
+    )
+    if planned_end is not None:
+        session.add(
+            DeliveryOutboxEvent(
+                delivery_id=delivery.id,
+                event_type="DeliveryStop",
+                due_at=planned_end,
+                payload={"deliveryId": str(delivery.id)},
+            )
+        )
+    return delivery
+
+
+def apply_delivery_stop(
+    session: Session, delivery: Delivery, *, reason: str | None = None
+) -> Delivery:
+    """Apply stop/cancel transitions without committing (shared by route actions)."""
+
+    if delivery.state == DeliveryState.PENDING.value:
+        _cancel_pending_events(session, delivery.id)
+        delivery.state = DeliveryState.CANCELLED.value
+    elif delivery.state in (DeliveryState.STARTING.value, DeliveryState.IN_PROGRESS.value):
+        _cancel_pending_events(session, delivery.id)
+        was_starting = delivery.state == DeliveryState.STARTING.value
+        delivery.state = DeliveryState.STOPPING.value
+        delivery.stop_reason = delivery.stop_reason or reason or "SCHEDULED_END"
+        if not was_starting:
+            _queue_event_once(session, delivery, "PipelineUnlink", datetime.now(timezone.utc))
+    elif delivery.state not in (DeliveryState.STOPPING.value, DeliveryState.CANCELLED.value):
+        raise HTTPException(status_code=409, detail="Delivery cannot be stopped")
+    return delivery
 
 
 @router.post("", response_model=DeliveryRead, status_code=status.HTTP_201_CREATED)
@@ -204,8 +333,7 @@ def create_delivery(
         if resource is None or resource.is_deleted:
             raise HTTPException(status_code=404, detail=f"{label} not found")
 
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        session.execute(text("LOCK TABLE delivery IN SHARE ROW EXCLUSIVE MODE"))
+    _lock_delivery_table(session)
 
     destination_ids = {
         resource_id
@@ -215,48 +343,23 @@ def create_delivery(
         )
         if resource_id is not None
     }
-    overlap_conditions = [
-        Delivery.destination_id.in_(destination_ids),
-        Delivery.redundant_destination_id.in_(destination_ids),
-    ]
-    overlap_filters = [
-        Delivery.state.in_(
-            [
-                DeliveryState.PENDING.value,
-                DeliveryState.STARTING.value,
-                DeliveryState.IN_PROGRESS.value,
-                DeliveryState.STOPPING.value,
-            ]
-        ),
-        or_(Delivery.planned_end.is_(None), Delivery.planned_end > payload.planned_start),
-        or_(*overlap_conditions),
-    ]
-    if payload.planned_end is not None:
-        overlap_filters.append(Delivery.planned_start < payload.planned_end)
-    overlap_statement = select(Delivery.id).where(*overlap_filters)
-    if session.scalar(overlap_statement.limit(1)) is not None:
+    if find_overlapping_delivery(
+        session, destination_ids, payload.planned_start, payload.planned_end
+    ) is not None:
         raise HTTPException(status_code=409, detail="Destination overlaps an existing delivery")
 
-    delivery = Delivery(**payload.model_dump())
-    session.add(delivery)
-    session.flush()
-    session.add(
-        DeliveryOutboxEvent(
-            delivery_id=delivery.id,
-            event_type="DeliveryStart",
-            due_at=payload.planned_start,
-            payload={"deliveryId": str(delivery.id)},
-        )
+    delivery = _add_delivery_with_events(
+        session,
+        source_id=payload.source_id,
+        destination_id=payload.destination_id,
+        redundant_source_id=payload.redundant_source_id,
+        redundant_destination_id=payload.redundant_destination_id,
+        planned_start=payload.planned_start,
+        planned_end=payload.planned_end,
+        is_open_ended=payload.is_open_ended,
+        stream_profile_locked=payload.stream_profile_locked,
+        media_options=payload.media_options,
     )
-    if payload.planned_end is not None:
-        session.add(
-            DeliveryOutboxEvent(
-                delivery_id=delivery.id,
-                event_type="DeliveryStop",
-                due_at=payload.planned_end,
-                payload={"deliveryId": str(delivery.id)},
-            )
-        )
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -365,8 +468,20 @@ def complete_pipeline_link(session: Session, delivery: Delivery) -> None:
         raise HTTPException(status_code=409, detail="Delivery is not starting")
 
 
+def _sync_route(session: Session, delivery: Delivery) -> None:
+    if delivery.route_id is None:
+        return
+    from app.domains.route_lifecycle import sync_route_for_delivery
+
+    sync_route_for_delivery(session, delivery)
+
+
 @internal_router.post("/{delivery_id}/start", response_model=DeliveryRead)
-def start_delivery(delivery_id: UUID, session: Session = Depends(get_session)) -> Delivery:
+def start_delivery(
+    delivery_id: UUID,
+    actor: str = Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> Delivery:
     delivery = _lock_delivery_or_404(delivery_id, session)
     if delivery.state in (DeliveryState.STARTING.value, DeliveryState.IN_PROGRESS.value):
         return delivery
@@ -374,26 +489,43 @@ def start_delivery(delivery_id: UUID, session: Session = Depends(get_session)) -
         raise HTTPException(status_code=409, detail="Delivery is not pending")
     delivery.state = DeliveryState.STARTING.value
     _queue_event(session, delivery, "PipelineLink", datetime.now(timezone.utc))
+    record_audit(
+        session,
+        actor=actor,
+        action="delivery.start",
+        target_type="delivery",
+        target_id=delivery.id,
+    )
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
 
 
 @internal_router.post("/{delivery_id}/stop", response_model=DeliveryRead)
-def stop_delivery(delivery_id: UUID, session: Session = Depends(get_session)) -> Delivery:
+def stop_delivery(
+    delivery_id: UUID,
+    actor: str = Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> Delivery:
     delivery = _lock_delivery_or_404(delivery_id, session)
-    if delivery.state == DeliveryState.PENDING.value:
-        _cancel_pending_events(session, delivery.id)
-        delivery.state = DeliveryState.CANCELLED.value
-    elif delivery.state in (DeliveryState.STARTING.value, DeliveryState.IN_PROGRESS.value):
-        _cancel_pending_events(session, delivery.id)
-        was_starting = delivery.state == DeliveryState.STARTING.value
-        delivery.state = DeliveryState.STOPPING.value
-        delivery.stop_reason = delivery.stop_reason or "SCHEDULED_END"
-        if not was_starting:
-            _queue_event_once(session, delivery, "PipelineUnlink", datetime.now(timezone.utc))
-    elif delivery.state not in (DeliveryState.STOPPING.value, DeliveryState.CANCELLED.value):
+    if delivery.state in (
+        DeliveryState.STOPPING.value,
+        DeliveryState.COMPLETE.value,
+        DeliveryState.ERROR.value,
+        DeliveryState.CANCELLED.value,
+    ):
         raise HTTPException(status_code=409, detail="Delivery cannot be stopped")
+    apply_delivery_stop(session, delivery, reason="SCHEDULED_END")
+    record_audit(
+        session,
+        actor=actor,
+        action="delivery.stop",
+        target_type="delivery",
+        target_id=delivery.id,
+        request_metadata={"state": delivery.state},
+    )
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -402,18 +534,15 @@ def stop_delivery(delivery_id: UUID, session: Session = Depends(get_session)) ->
 @router.patch("/{delivery_id}/cancel", response_model=DeliveryRead)
 def cancel_delivery(delivery_id: UUID, session: Session = Depends(get_session)) -> Delivery:
     delivery = _lock_delivery_or_404(delivery_id, session)
-    if delivery.state == DeliveryState.PENDING.value:
-        _cancel_pending_events(session, delivery.id)
-        delivery.state = DeliveryState.CANCELLED.value
-    elif delivery.state in (DeliveryState.STARTING.value, DeliveryState.IN_PROGRESS.value):
-        _cancel_pending_events(session, delivery.id)
-        was_starting = delivery.state == DeliveryState.STARTING.value
-        delivery.state = DeliveryState.STOPPING.value
-        delivery.stop_reason = "CANCELLED"
-        if not was_starting:
-            _queue_event_once(session, delivery, "PipelineUnlink", datetime.now(timezone.utc))
-    elif delivery.state not in (DeliveryState.STOPPING.value, DeliveryState.CANCELLED.value):
+    if delivery.state in (
+        DeliveryState.STOPPING.value,
+        DeliveryState.COMPLETE.value,
+        DeliveryState.ERROR.value,
+        DeliveryState.CANCELLED.value,
+    ):
         raise HTTPException(status_code=409, detail="Delivery can no longer be cancelled")
+    apply_delivery_stop(session, delivery, reason="CANCELLED")
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -425,6 +554,7 @@ def mark_pipeline_started(
 ) -> Delivery:
     delivery = _lock_delivery_or_404(delivery_id, session)
     complete_pipeline_link(session, delivery)
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -444,6 +574,7 @@ def mark_pipeline_stopped(
         if delivery.stop_reason == "CANCELLED"
         else DeliveryState.COMPLETE.value
     )
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -462,6 +593,7 @@ def mark_pipeline_failed(
         raise HTTPException(status_code=409, detail="Terminal delivery cannot fail")
     _cancel_pending_events(session, delivery.id)
     delivery.state = DeliveryState.ERROR.value
+    _sync_route(session, delivery)
     session.commit()
     session.refresh(delivery)
     return delivery
@@ -478,4 +610,5 @@ def delete_delivery(delivery_id: UUID, session: Session = Depends(get_session)) 
         raise HTTPException(status_code=409, detail="Stop the delivery before deleting it")
     _cancel_pending_events(session, delivery.id)
     delivery.state = DeliveryState.DELETED.value
+    _sync_route(session, delivery)
     session.commit()

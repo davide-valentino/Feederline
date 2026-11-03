@@ -209,14 +209,18 @@ def test_step_functions_publisher_treats_duplicate_execution_as_success():
     assert execution["executionArn"].endswith(":unlink-f51ec826-a170-43d1-b18b-bfd593b6a451")
 
 
-def test_dispatch_persists_started_workflow_execution(client, test_session_factory):
+def test_dispatch_persists_started_workflow_execution(
+    client, test_session_factory, operator_headers
+):
     now = datetime.now(timezone.utc)
     delivery = create_delivery(
         client,
         start=now + timedelta(hours=1),
         end=now + timedelta(hours=2),
     )
-    client.post(f"/internal/deliveries/{delivery['id']}/start")
+    client.post(
+        f"/internal/deliveries/{delivery['id']}/start", headers=operator_headers
+    )
 
     class WorkflowPublisher:
         def publish(self, event_type, _detail):
@@ -240,14 +244,18 @@ def test_dispatch_persists_started_workflow_execution(client, test_session_facto
     assert run.status == WorkflowRunStatus.RUNNING.value
 
 
-def test_eventbridge_only_dispatch_does_not_claim_workflow_started(client, test_session_factory):
+def test_eventbridge_only_dispatch_does_not_claim_workflow_started(
+    client, test_session_factory, operator_headers
+):
     now = datetime.now(timezone.utc)
     delivery = create_delivery(
         client,
         start=now + timedelta(hours=1),
         end=now + timedelta(hours=2),
     )
-    client.post(f"/internal/deliveries/{delivery['id']}/start")
+    client.post(
+        f"/internal/deliveries/{delivery['id']}/start", headers=operator_headers
+    )
     dispatch_now = datetime.now(timezone.utc) + timedelta(seconds=1)
 
     assert dispatch_due_events(RecordingPublisher(), test_session_factory, now=dispatch_now) == 1

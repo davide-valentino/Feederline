@@ -5,7 +5,18 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import settings
 from app.database import Base
-from app.domains import deliveries, destinations, sources, stream_profiles
+from app.domains import (
+    audit,
+    connections,
+    content,
+    deliveries,
+    destinations,
+    operator,
+    route_events,
+    routes,
+    sources,
+    stream_profiles,
+)
 
 
 config = context.config

@@ -5,10 +5,11 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import JSON, ForeignKey, String, or_, select
+from sqlalchemy import JSON, ForeignKey, Index, String, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from app.auth import require_operator
 from app.database import Base, CreatedAtMixin, get_session
 from app.domains.stream_profiles import StreamProfile
 
@@ -29,10 +30,27 @@ class DestinationType(str, Enum):
 
 class Destination(Base, CreatedAtMixin):
     __tablename__ = "destination"
+    __table_args__ = (
+        Index(
+            "uq_destination_customer_name",
+            "name",
+            unique=True,
+            sqlite_where=text("capability_id IS NOT NULL"),
+            postgresql_where=text("capability_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_destination_legacy_name",
+            "name",
+            unique=True,
+            sqlite_where=text("capability_id IS NULL"),
+            postgresql_where=text("capability_id IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     destination_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_id: Mapped[str | None] = mapped_column(String(64))
     region: Mapped[str | None] = mapped_column(String(64))
     availability_zone: Mapped[str | None] = mapped_column(String(64))
     stream_profile_id: Mapped[UUID | None] = mapped_column(
@@ -87,6 +105,7 @@ class DestinationRead(BaseModel):
     id: UUID
     name: str
     destination_type: str
+    capability_id: str | None
     region: str | None
     availability_zone: str | None
     stream_profile_id: UUID | None
@@ -94,7 +113,11 @@ class DestinationRead(BaseModel):
     created_at: datetime
 
 
-router = APIRouter(prefix="/v1/destinations", tags=["destinations"])
+router = APIRouter(
+    prefix="/v1/destinations",
+    tags=["destinations"],
+    dependencies=[Depends(require_operator)],
+)
 
 
 @router.post("", response_model=DestinationRead, status_code=status.HTTP_201_CREATED)
