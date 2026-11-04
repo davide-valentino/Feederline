@@ -10,6 +10,14 @@ build/
 # AWS SAM build artifacts
 .aws-sam/
 
+# Terraform artifacts (state lives in the remote S3 backend; provider lock
+# files (.terraform.lock.hcl) are committed with the rest of the code)
+.terraform/
+terraform.tfstate
+terraform.tfstate.*.info
+terraform.tfstate.backup
+*.tfplan
+
 # Playwright MCP browser artifacts (trademark screening sessions)
 .playwright-mcp/
 
