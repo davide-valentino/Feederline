@@ -99,12 +99,57 @@ here), `DB_SECRET_ARN` (plain env, not a credential), `OPERATOR_TOKEN`
 role). Note: ECS's Secrets Manager JSON-key selector fails on path-style
 secret names — hence DB_SECRET_ARN + task-role GetSecretValue instead.
 
-## Teardown (development account, test cycles)
+## Bootstrap after a teardown
+
+Everything below bootstrap is re-deployable from code (TF state bucket
+`feederline-development-tfstate-<account>` is retained; the state for the
+platform is empty after a destroy). The SAM child stack owns the
+`feederline-direct-media` state machine, so the first platform apply must
+expect it to be absent:
 
 ```bash
-aws cloudformation delete-stack --stack-name feederline-pilot-direct
-terraform -chdir=infra/platform apply -destroy -auto-approve
-terraform -chdir=infra/bootstrap destroy
+# 1. platform (state machine not yet in the account)
+terraform -chdir=infra/platform apply \
+  -var sam_stack_deployed=false -var event_publisher=eventbridge
+
+# 2. SAM pilot stack (reads the fresh TF outputs)
+AWS_PROFILE=feederline-development infra/deploy_pilot.sh -y
+
+# 3. platform again — resolves the state machine ARN, flips the publisher
+terraform -chdir=infra/platform apply -var event_publisher=stepfunctions
+
+# 4. schema + services + smoke
+AWS_PROFILE=feederline-development infra/db_tunnel.sh      # start bastion
+aws ecs run-task --cluster feederline-development          # alembic upgrade
+   ... --overrides '{"containerOverrides":[{"name":"api", \
+        "command":["python","-m","alembic","upgrade","head"]}]}'
+infra/deploy_pilot.sh || docker push ...                   # image still in ECR
+AWS_PROFILE=feederline-development infra/app_smoke.sh
 ```
+
+While `sam_stack_deployed=false`, the task role's `states:*` statement is
+temporally scoped to `*` (bootstrap pass only); the second apply narrows it
+back to the state machine ARN. If you want the image rebuilt from scratch
+instead of reusing the ECR tag, see the App tier section for the buildx line.
+
+## Teardown (development account, test cycles)
+
+Full teardown avoids all running costs between sessions (the platform is
+rebuildable, so prefer it over idle-days of NAT + RDS billing):
+
+```bash
+# 1. platform first — the SAM state machine must still exist while the plan
+#    resolves data.aws_sfn_state_machine
+terraform -chdir=infra/platform destroy -auto-approve
+
+# 2. SAM child stack after
+aws cloudformation delete-stack --stack-name feederline-pilot-direct
+aws cloudformation wait stack-delete-complete --stack-name feederline-pilot-direct
+```
+
+Kept: the bootstrap bucket (TF state, S3-native lock) and the ECR image
+tags. Note the DB secret is force-deleted (recovery window 0) and RDS has
+no final snapshot — development data does not survive a teardown.
+
 (RDS deletes without a final snapshot per the pilot flags; the secret has
 `recovery_window_in_days=0`.)

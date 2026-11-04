@@ -35,7 +35,7 @@ locals {
     { name = "PYTHONUNBUFFERED", value = "1" },
     { name = "EVENT_PUBLISHER", value = var.event_publisher },
     { name = "EVENT_BUS_NAME", value = aws_cloudwatch_event_bus.main.name },
-    { name = "WORKFLOW_STATE_MACHINE_ARN", value = data.aws_sfn_state_machine.direct_media.arn },
+    { name = "WORKFLOW_STATE_MACHINE_ARN", value = local.sfn_arn },
     # Not confidential (an ARN): app/config.py fetches the DB URI with the
     # task role at import. Avoids ECS's Secrets Manager JSON-key selector,
     # which rejects path-style secret names ("unexpected ARN format").

@@ -80,9 +80,24 @@ resource "aws_iam_role" "ecs_task" {
 # EventBridge Publish, secret read (DB_SECRET_ARN fallback), Step Functions
 # start/describe on the pilot state machine, and ECS Exec debugging
 # (ssmmessages). The state machine belongs to the SAM child stack, so it is
-# looked up by name here and never re-declared in Terraform.
+# looked up by name here and never re-declared in Terraform. The lookup is
+# gated by sam_stack_deployed so the FIRST apply after a teardown can run
+# before `infra/deploy_pilot.sh` recreates the child stack.
+variable "sam_stack_deployed" {
+  description = "Set false for the first apply after a teardown; deploy the SAM stack, then apply again with the default"
+  type        = bool
+  default     = true
+}
+
 data "aws_sfn_state_machine" "direct_media" {
-  name = "feederline-direct-media"
+  count = var.sam_stack_deployed ? 1 : 0
+  name  = "feederline-direct-media"
+}
+
+locals {
+  # '' when the SAM stack is absent (try() absorbs the index error; no data
+  # source is read at all once count == 0)
+  sfn_arn = try(data.aws_sfn_state_machine.direct_media[0].arn, "")
 }
 
 resource "aws_iam_role_policy" "ecs_task_publish" {
@@ -107,7 +122,7 @@ resource "aws_iam_role_policy" "ecs_task_publish" {
           "states:StartExecution",
           "states:DescribeExecution",
         ]
-        Resource = data.aws_sfn_state_machine.direct_media.arn
+        Resource = local.sfn_arn != "" ? local.sfn_arn : "*"
       },
       {
         Effect = "Allow"
