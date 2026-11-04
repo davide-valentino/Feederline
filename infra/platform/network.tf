@@ -16,7 +16,7 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  azs     = slice(data.aws_availability_zones.available.names, 0, 2)
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
   cidrs = {
     public    = "10.40.0.0/24"
     private_a = "10.40.10.0/24"
@@ -28,7 +28,7 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.40.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = merge(local.tags, { Name = local.name })
+  tags                 = merge(local.tags, { Name = local.name })
 }
 
 resource "aws_subnet" "public" {

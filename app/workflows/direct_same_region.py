@@ -11,8 +11,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.domains import (  # noqa: F401  register every mapped table (mappers resolve relations across domains)
+    audit,
+    connections,
+    content,
+    operator,
+    route_events,
+    routes,
+    stream_profiles,
+)
+from app.domains import deliveries
 from app.domains.deliveries import (
     Delivery,
+    DeliveryOutboxEvent,
     DeliveryState,
     DeliveryWorkflowRun,
     WorkflowRunStatus,

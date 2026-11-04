@@ -1,0 +1,22 @@
+# Context for the container builds (Dockerfile at repo root). Keep it tight —
+# poetry resolution and the image layers only need app + alembic + pyproject.
+.git
+.github
+.aws-sam
+.idea
+.pytest_cache
+.ruff_cache
+.venv
+**/__pycache__
+**/*.py[cod]
+*.db
+*.sqlite3
+Dockerfile
+.dockerignore
+docs
+infra
+tests
+README.md
+AGENTS.md
+STEP_FUNCTIONS_MIGRATION.md
+requirements.txt

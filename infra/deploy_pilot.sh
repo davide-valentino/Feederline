@@ -47,22 +47,35 @@ echo "==> subnets: $PRIVATE_SUBNET_IDS"
 echo "==> lambda SG: $LAMBDA_SECURITY_GROUP_ID"
 
 # --- 2. Stage + build --------------------------------------------------------
-# Build from a staging copy so the Lambda zip gets app/ only (no .venv, .git).
+# Build from a staging copy so the Lambda zip gets app/ + its runtime deps
+# (Lambda has none baked in: sqlalchemy et al. must ship in the CodeUri).
+# Deps are resolved from poetry.lock and pulled as aarch64 binary wheels to
+# match the Lambda python3.12 arm64 runtime (glibc 2.34: manylinux_2_28+).
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -r "$REPO_ROOT/app" "$STAGE/app"
 mkdir -p "$STAGE/infra"
 cp "$REPO_ROOT/infra/template.yaml" "$REPO_ROOT/infra/direct_same_region.asl.json" "$STAGE/infra/"
 
-echo "==> sam build"
-# --build-dir must sit outside the CodeUri root or CopySource recurses into itself
-SAM_BUILD_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGE" "$SAM_BUILD_DIR"' EXIT
-sam build --template-file "$STAGE/infra/template.yaml" --base-dir "$STAGE/infra" --build-dir "$SAM_BUILD_DIR"
+echo "==> exporting Lambda runtime deps (cp312 / aarch64)"
+poetry -C "$REPO_ROOT" export -f requirements.txt --without-hashes --only main \
+  -o "$STAGE/requirements.lock"
+python3 -m pip install --quiet \
+  -r "$STAGE/requirements.lock" \
+  --platform manylinux2014_aarch64 --platform manylinux_2_28_aarch64 --platform manylinux_2_34_aarch64 \
+  --implementation cp --python-version 3.12 \
+  --only-binary=:all: \
+  --target "$STAGE"
+find "$STAGE" -maxdepth 1 -mindepth 1 -name "*.lock" -delete
 
 echo "==> sam package (bucket: $TFSTATE_BUCKET, key prefix: pilot/)"
+# NOTE: `sam build` is deliberately SKIPPED. Its default python copy excludes
+# compiled wheel artifacts (.so*, psycopg_binary.libs), which breaks psycopg's
+# binary import at runtime ("no pq wrapper available"). The staging dir is
+# already the exact package shape (app/ + aarch64 wheels), so it is zipped
+# as-is: CodeUri "../" relative to $STAGE/infra/template.yaml.
 sam package \
-  --template-file "$SAM_BUILD_DIR/template.yaml" \
+  --template-file "$STAGE/infra/template.yaml" \
   --s3-bucket "$TFSTATE_BUCKET" \
   --s3-prefix pilot \
   --output-template-file "$STAGE/packaged.yaml" >/dev/null

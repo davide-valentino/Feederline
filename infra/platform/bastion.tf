@@ -41,8 +41,8 @@ resource "aws_security_group" "bastion" {
 }
 
 resource "aws_iam_role" "bastion" {
-  name               = "${local.name}-bastion"
-  description        = "SSM managed instance for the development bastion"
+  name        = "${local.name}-bastion"
+  description = "SSM managed instance for the development bastion"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -83,8 +83,8 @@ resource "aws_instance" "bastion" {
   }
 
   tags = merge(local.tags, {
-    Name       = "${local.name}-bastion"
-    purpose    = "db-verification-ssm-tunnel"
+    Name         = "${local.name}-bastion"
+    purpose      = "db-verification-ssm-tunnel"
     keep-stopped = "true" # running is charged; stop when not in use
   })
 }

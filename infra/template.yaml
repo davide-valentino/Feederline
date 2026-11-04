@@ -53,6 +53,8 @@ Resources:
       MemorySize: 512
       Timeout: 60
       Role: !GetAtt ActivityRole.Arn
+      Architectures:
+        - arm64
       VpcConfig:
         SubnetIds: !Ref PrivateSubnetIds
         SecurityGroupIds:

@@ -51,6 +51,17 @@ resource "aws_security_group" "app" {
   description = "Feederline development ECS api + outbox worker tasks"
   vpc_id      = aws_vpc.main.id
 
+  # Smoke-test ingress for the pilot: infra/db_tunnel.sh pattern applied to the
+  # API — SSM port-forward via the bastion to the task ENI, port 8000. No ALB,
+  # no public exposure. Drop when a real ingress (internal ALB) lands.
+  ingress {
+    description     = "API from the SSM bastion (smoke tests)"
+    from_port       = 8000
+    to_port         = 8000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.bastion.id]
+  }
+
   egress {
     description = "Egress via NAT: RDS, Secrets Manager, EventBridge, ECR"
     from_port   = 0

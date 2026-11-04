@@ -26,8 +26,8 @@ resource "aws_ecs_cluster" "main" {
 }
 
 resource "aws_iam_role" "ecs_execution" {
-  name               = "${local.name}-ecs-execution"
-  description        = "Pull images and read container secrets (Fargate)"
+  name        = "${local.name}-ecs-execution"
+  description = "Pull images and read container secrets (Fargate)"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -44,23 +44,27 @@ resource "aws_iam_role_policy_attachment" "ecs_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Task read access to the DB secret (mirrors the Lambda grant in template.yaml).
+# Execution-role secret reads: containers get DB_URI (JSON key selector on the
+# DB secret) and OPERATOR_TOKEN injected by ECS at task launch.
 resource "aws_iam_role_policy" "ecs_execution_db_secret" {
   name = "db-secret"
   role = aws_iam_role.ecs_execution.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow",
-      Action   = "secretsmanager:GetSecretValue",
-      Resource = aws_secretsmanager_secret.db.arn
+      Effect = "Allow",
+      Action = "secretsmanager:GetSecretValue",
+      Resource = [
+        aws_secretsmanager_secret.db.arn,
+        aws_secretsmanager_secret.operator_token.arn,
+      ]
     }]
   })
 }
 
 resource "aws_iam_role" "ecs_task" {
-  name               = "${local.name}-ecs-task"
-  description        = "Runtime permissions for api + outbox worker (EventBridge / Step Functions)"
+  name        = "${local.name}-ecs-task"
+  description = "Runtime permissions for api + outbox worker (EventBridge / Step Functions)"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -73,9 +77,14 @@ resource "aws_iam_role" "ecs_task" {
 }
 
 # Runtime permission set mirrors app/config.py + app/outbox.py needs:
-# EventBridge Publish + StepFunctions StartExecution on the pilot stack output.
-# ARNs of the state machine are injected when the app tier milestone wires
-# services: stack output DirectMediaWorkflowArn -> map into this policy here.
+# EventBridge Publish, secret read (DB_SECRET_ARN fallback), Step Functions
+# start/describe on the pilot state machine, and ECS Exec debugging
+# (ssmmessages). The state machine belongs to the SAM child stack, so it is
+# looked up by name here and never re-declared in Terraform.
+data "aws_sfn_state_machine" "direct_media" {
+  name = "feederline-direct-media"
+}
+
 resource "aws_iam_role_policy" "ecs_task_publish" {
   name = "publish-events"
   role = aws_iam_role.ecs_task.id
@@ -91,6 +100,24 @@ resource "aws_iam_role_policy" "ecs_task_publish" {
         Effect   = "Allow"
         Action   = "secretsmanager:GetSecretValue"
         Resource = aws_secretsmanager_secret.db.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution",
+          "states:DescribeExecution",
+        ]
+        Resource = data.aws_sfn_state_machine.direct_media.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssmmessages:CreateControlChannel",
+          "ssmmessages:CreateDataChannel",
+          "ssmmessages:OpenControlChannel",
+          "ssmmessages:OpenDataChannel",
+        ]
+        Resource = "*"
       }
     ]
   })

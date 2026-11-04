@@ -70,6 +70,35 @@ Stop the instance after use (`aws ec2 stop-instances --instance-ids <id>`); it
 bills while running. Credentials never appear in the scripts — they are pulled
 from the DB secret at run time.
 
+## App tier (ECS Fargate, api + outbox worker)
+
+Deployed in `infra/platform/ecs.tf`: one image (`Dockerfile`, arm64), two
+containers — api (`uvicorn app.main:app`) and worker (`python -m app.outbox`).
+Private subnets, app SG, ECS Exec enabled for ad-hoc probes. During the pilot
+the API has **no load balancer**: reach it through the SSM bastion exactly
+like the DB tunnel (`infra/app_smoke.sh` does start → tunnel → probes).
+EVENT_PUBLISHER starts as `eventbridge` (outbox → `tv.feederline` only);
+apply with `-var event_publisher=stepfunctions` to upgrade: the worker then
+also starts executions itself, so `delivery_workflow_run.execution_arn` is
+filled from the worker instead of the bus rule.
+
+```bash
+# image
+docker buildx build --platform linux/arm64 -t <ecr>/feederline-development/api:v0.1.0 .
+# schema migrations run as a one-off task with the same image
+aws ecs run-task --cluster feederline-development ... --overrides '{
+  "containerOverrides":[{"name":"api","command":["python","-m","alembic","upgrade","head"]}]}'
+# full smoke: health probes -> operator resources -> delivery start -> outbox
+AWS_PROFILE=feederline-development infra/app_smoke.sh
+```
+
+Task env: `EVENT_PUBLISHER`, `EVENT_BUS_NAME`, `WORKFLOW_STATE_MACHINE_ARN`
+(data source on `feederline-direct-media`, referenced but never re-declared
+here), `DB_SECRET_ARN` (plain env, not a credential), `OPERATOR_TOKEN`
+(secret `feederline/development/operator-token`, injected by the execution
+role). Note: ECS's Secrets Manager JSON-key selector fails on path-style
+secret names — hence DB_SECRET_ARN + task-role GetSecretValue instead.
+
 ## Teardown (development account, test cycles)
 
 ```bash
