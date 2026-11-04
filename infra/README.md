@@ -46,6 +46,30 @@ terraform -chdir=infra/platform apply /tmp/tfplan
 infra/deploy_pilot.sh -y
 ```
 
+## DB verification (no bastion SSH, no public IP)
+
+The platform includes a sleeping SSM bastion (`infra/platform/bastion.tf`,
+t4g.nano, `keep-stopped` tag — ~$0.7/mo idle, $0.004/h while in use). It is
+reached via `infra/db_tunnel.sh`, which starts the instance if stopped, opens
+an SSM port-forward tunnel (`localhost:15432 -> RDS:5432`), pulls credentials
+from Secrets Manager and introspects the schema:
+
+```bash
+infra/db_tunnel.sh                 # one-shot: list tables + pg version
+infra/db_tunnel.sh --keep-open     # hold the tunnel; ctrl-c to close
+infra/db_tunnel.sh -- "SELECT 1"   # custom SQL in one-shot mode
+
+# with the tunnel open, normal local tooling works against 127.0.0.1:15432
+psql -h localhost -p 15432 -U feederline -d feederline
+AWS_PROFILE=feederline-development \
+DB_URI="postgresql+psycopg://feederline:<pw-set from secret>@127.0.0.1:15432/feederline?sslmode=require" \
+  poetry run alembic upgrade head   # TLS is mandatory (rds.force_ssl=1)
+```
+
+Stop the instance after use (`aws ec2 stop-instances --instance-ids <id>`); it
+bills while running. Credentials never appear in the scripts — they are pulled
+from the DB secret at run time.
+
 ## Teardown (development account, test cycles)
 
 ```bash
